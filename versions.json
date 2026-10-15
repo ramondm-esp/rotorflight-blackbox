@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "type": "master",
+      "name": "master",
+      "path": "./master/",
+      "notes": "Latest development build"
+    }
+  ]
+}
