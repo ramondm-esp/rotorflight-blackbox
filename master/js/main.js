@@ -733,7 +733,8 @@ function BlackboxLogViewer() {
         }
     }
 
-    function loadLogFile(file) {
+    // isConfiguration: the file is a CLI dump, whatever its first line says.
+    function loadLogFile(file, isConfiguration) {
         var reader = new FileReader();
 
         reader.onload = function(e) {
@@ -741,7 +742,7 @@ function BlackboxLogViewer() {
 
             var fileContents = String.fromCharCode.apply(null, new Uint8Array(bytes, 0, Math.min(100, bytes.byteLength)));
 
-            if(fileContents.match(/# dump|# diff/i)) { // this is actually a configuration file
+            if(isConfiguration || fileContents.match(/# dump|# diff/i)) { // this is actually a configuration file
                 try{
 
                    // Firstly, is this a configuration defaults file
@@ -2343,6 +2344,102 @@ function BlackboxLogViewer() {
             }
         }
         checkIfFileAsParameter();
+
+        // Shared logs: ?log=<url>&cli=<url> opens a blackbox log and, optionally,
+        // its CLI dump, as linked by the "Open in Blackbox Explorer" button of the
+        // log sharing sites. Only those sites (and a local test server) are
+        // accepted; they allow the download with CORS.
+        const SHARED_LOG_HOSTS = ['logs.rotorflight.org', 'logs.wingflight.org'];
+
+        function sharedLogUrl(value) {
+            let url;
+            try {
+                url = new URL(value);
+            } catch (_e) {
+                return null;
+            }
+            const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+            const allowed = local
+                ? (url.protocol === 'http:' || url.protocol === 'https:')
+                : (url.protocol === 'https:' && SHARED_LOG_HOSTS.includes(url.hostname));
+            return allowed ? url : null;
+        }
+
+        // Downloads a shared file, reporting the bytes received so far and the
+        // total. The log sites send logs gzip-compressed (the browser unpacks
+        // them), so the real size comes from their X-Log-Size header rather
+        // than Content-Length, which is the compressed size.
+        async function fetchSharedFile(url, fallbackName, onProgress) {
+            const response = await fetch(url, { credentials: 'omit' });
+            if (!response.ok) {
+                throw new Error(response.status === 404
+                    ? 'it no longer exists. It may have been deleted, or its time ran out.'
+                    : `the server answered ${response.status}.`);
+            }
+            const disposition = response.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename="([^"]+)"/);
+            const total = Number(response.headers.get('X-Log-Size')) || 0;
+            const chunks = [];
+            let received = 0;
+            if (response.body && response.body.getReader) {
+                const reader = response.body.getReader();
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        break;
+                    }
+                    chunks.push(value);
+                    received += value.length;
+                    onProgress(received, total);
+                }
+            } else {
+                chunks.push(await response.blob());
+            }
+            return new File(chunks, match ? match[1] : fallbackName);
+        }
+
+        function formatMegabytes(bytes) {
+            return (bytes / 1048576).toFixed(1);
+        }
+
+        async function loadSharedLog() {
+            const params = new URLSearchParams(window.location.search);
+            if (!params.has('log')) {
+                return;
+            }
+            const message = $("#loading-file-text");
+            const logUrl = sharedLogUrl(params.get('log'));
+            const cliUrl = params.has('cli') ? sharedLogUrl(params.get('cli')) : null;
+            if (!logUrl || (params.has('cli') && !cliUrl)) {
+                message.text(`Shared logs can only be opened from ${SHARED_LOG_HOSTS.join(' or ')}.`).show();
+                return;
+            }
+            message.text('Downloading the shared log...').show();
+            let shown = '';
+            const progress = (received, total) => {
+                const text = total >= received
+                    ? `Downloading the shared log... ${formatMegabytes(received)} of ${formatMegabytes(total)} MB (${Math.floor(received * 100 / total)} %)`
+                    : `Downloading the shared log... ${formatMegabytes(received)} MB`;
+                if (text !== shown) {
+                    shown = text;
+                    message.text(text);
+                }
+            };
+            try {
+                // The CLI dump is small; fetch it alongside the log.
+                const [log, cli] = await Promise.all([
+                    fetchSharedFile(logUrl, 'shared.bbl', progress),
+                    cliUrl ? fetchSharedFile(cliUrl, 'cli.txt', () => {}) : null,
+                ]);
+                loadFiles([log]);
+                if (cli) {
+                    loadLogFile(cli, true);
+                }
+            } catch (e) {
+                message.text(`Could not open the shared log: ${e.message}`).show();
+            }
+        }
+        loadSharedLog();
 
         // File extension association -- OS-level "open with" support, only meaningful for
         // the NW.js desktop build; there is no equivalent for a page running in a browser tab.
